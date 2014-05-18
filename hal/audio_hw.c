@@ -214,8 +214,7 @@ static int get_snd_codec_id(audio_format_t format)
 }
 
 int enable_audio_route(struct audio_device *adev,
-                              struct audio_usecase *usecase,
-                              bool update_mixer)
+                       struct audio_usecase *usecase)
 {
     snd_device_t snd_device;
     char mixer_path[MIXER_PATH_MAX_LENGTH];
@@ -236,18 +235,14 @@ int enable_audio_route(struct audio_device *adev,
 #endif
     strcpy(mixer_path, use_case_table[usecase->id]);
     platform_add_backend_name(mixer_path, snd_device);
-    ALOGV("%s: apply mixer path: %s", __func__, mixer_path);
-    audio_route_apply_path(adev->audio_route, mixer_path);
-    if (update_mixer)
-        audio_route_update_mixer(adev->audio_route);
-
+    ALOGV("%s: apply mixer and update path: %s", __func__, mixer_path);
+    audio_route_apply_and_update_path(adev->audio_route, mixer_path);
     ALOGV("%s: exit", __func__);
     return 0;
 }
 
 int disable_audio_route(struct audio_device *adev,
-                        struct audio_usecase *usecase,
-                        bool update_mixer)
+                        struct audio_usecase *usecase)
 {
     snd_device_t snd_device;
     char mixer_path[MIXER_PATH_MAX_LENGTH];
@@ -262,18 +257,14 @@ int disable_audio_route(struct audio_device *adev,
         snd_device = usecase->out_snd_device;
     strcpy(mixer_path, use_case_table[usecase->id]);
     platform_add_backend_name(mixer_path, snd_device);
-    ALOGV("%s: reset mixer path: %s", __func__, mixer_path);
-    audio_route_reset_path(adev->audio_route, mixer_path);
-    if (update_mixer)
-        audio_route_update_mixer(adev->audio_route);
-
+    ALOGV("%s: reset and update mixer path: %s", __func__, mixer_path);
+    audio_route_reset_and_update_path(adev->audio_route, mixer_path);
     ALOGV("%s: exit", __func__);
     return 0;
 }
 
 int enable_snd_device(struct audio_device *adev,
-                             snd_device_t snd_device,
-                             bool update_mixer)
+                      snd_device_t snd_device)
 {
     char device_name[DEVICE_NAME_MAX_SIZE] = {0};
 
@@ -299,12 +290,12 @@ int enable_snd_device(struct audio_device *adev,
      * control in use-case does not work because rate update takes place after
      * AFE port open due to the limitation of mixer control order execution.
      */
-    if (snd_device == SND_DEVICE_OUT_BT_SCO) {
-        audio_route_apply_path(adev->audio_route, BT_SCO_SAMPLE_RATE);
-        audio_route_update_mixer(adev->audio_route);
-    } else if (snd_device == SND_DEVICE_OUT_BT_SCO_WB) {
-        audio_route_apply_path(adev->audio_route, BT_SCO_WB_SAMPLE_RATE);
-        audio_route_update_mixer(adev->audio_route);
+    if ((snd_device == SND_DEVICE_OUT_BT_SCO) ||
+        (snd_device == SND_DEVICE_IN_BT_SCO_MIC)) {
+        audio_route_apply_and_update_path(adev->audio_route, BT_SCO_SAMPLE_RATE);
+    } else if ((snd_device == SND_DEVICE_OUT_BT_SCO_WB) ||
+               (snd_device == SND_DEVICE_IN_BT_SCO_MIC_WB)) {
+        audio_route_apply_and_update_path(adev->audio_route, BT_SCO_WB_SAMPLE_RATE);
     }
 
     /* start usb playback thread */
@@ -335,17 +326,13 @@ int enable_snd_device(struct audio_device *adev,
                            LISTEN_EVENT_SND_DEVICE_FREE);
             return -EINVAL;
         }
-        audio_route_apply_path(adev->audio_route, device_name);
+        audio_route_apply_and_update_path(adev->audio_route, device_name);
     }
-    if (update_mixer)
-        audio_route_update_mixer(adev->audio_route);
-
     return 0;
 }
 
 int disable_snd_device(struct audio_device *adev,
-                       snd_device_t snd_device,
-                       bool update_mixer)
+                       snd_device_t snd_device)
 {
     char device_name[DEVICE_NAME_MAX_SIZE] = {0};
 
@@ -382,10 +369,7 @@ int disable_snd_device(struct audio_device *adev,
             audio_extn_spkr_prot_is_enabled()) {
             audio_extn_spkr_prot_stop_processing();
         } else
-            audio_route_reset_path(adev->audio_route, device_name);
-
-        if (update_mixer)
-            audio_route_update_mixer(adev->audio_route);
+            audio_route_reset_and_update_path(adev->audio_route, device_name);
 
         audio_extn_listen_update_status(snd_device,
                                         LISTEN_EVENT_SND_DEVICE_FREE);
@@ -427,29 +411,26 @@ static void check_usecases_codec_backend(struct audio_device *adev,
             ALOGV("%s: Usecase (%s) is active on (%s) - disabling ..",
                   __func__, use_case_table[usecase->id],
                   platform_get_snd_device_name(usecase->out_snd_device));
-            disable_audio_route(adev, usecase, false);
+            disable_audio_route(adev, usecase);
             switch_device[usecase->id] = true;
             num_uc_to_switch++;
         }
     }
 
     if (num_uc_to_switch) {
-        /* Make sure all the streams are de-routed before disabling the device */
-        audio_route_update_mixer(adev->audio_route);
+        /* All streams have been de-routed. Disable the device */
 
-        /* Make sure the previous devices to be disabled first and then enable the
-           selected devices */
         list_for_each(node, &adev->usecase_list) {
             usecase = node_to_item(node, struct audio_usecase, list);
             if (switch_device[usecase->id]) {
-                disable_snd_device(adev, usecase->out_snd_device, true);
+                disable_snd_device(adev, usecase->out_snd_device);
             }
         }
 
         list_for_each(node, &adev->usecase_list) {
             usecase = node_to_item(node, struct audio_usecase, list);
             if (switch_device[usecase->id]) {
-                enable_snd_device(adev, snd_device, true);
+                enable_snd_device(adev, snd_device);
             }
         }
 
@@ -460,7 +441,7 @@ static void check_usecases_codec_backend(struct audio_device *adev,
             /* Update the out_snd_device only before enabling the audio route */
             if (switch_device[usecase->id] ) {
                 usecase->out_snd_device = snd_device;
-                enable_audio_route(adev, usecase, false);
+                enable_audio_route(adev, usecase);
             }
         }
     }
@@ -496,29 +477,26 @@ static void check_and_route_capture_usecases(struct audio_device *adev,
             ALOGV("%s: Usecase (%s) is active on (%s) - disabling ..",
                   __func__, use_case_table[usecase->id],
                   platform_get_snd_device_name(usecase->in_snd_device));
-            disable_audio_route(adev, usecase, false);
+            disable_audio_route(adev, usecase);
             switch_device[usecase->id] = true;
             num_uc_to_switch++;
         }
     }
 
     if (num_uc_to_switch) {
-        /* Make sure all the streams are de-routed before disabling the device */
-        audio_route_update_mixer(adev->audio_route);
+        /* All streams have been de-routed. Disable the device */
 
-        /* Make sure the previous devices to be disabled first and then enable the
-           selected devices */
         list_for_each(node, &adev->usecase_list) {
             usecase = node_to_item(node, struct audio_usecase, list);
             if (switch_device[usecase->id]) {
-                disable_snd_device(adev, usecase->in_snd_device, true);
+                disable_snd_device(adev, usecase->in_snd_device);
             }
         }
 
         list_for_each(node, &adev->usecase_list) {
             usecase = node_to_item(node, struct audio_usecase, list);
             if (switch_device[usecase->id]) {
-                enable_snd_device(adev, snd_device, true);
+                enable_snd_device(adev, snd_device);
             }
         }
 
@@ -529,7 +507,7 @@ static void check_and_route_capture_usecases(struct audio_device *adev,
             /* Update the in_snd_device only before enabling the audio route */
             if (switch_device[usecase->id] ) {
                 usecase->in_snd_device = snd_device;
-                enable_audio_route(adev, usecase, false);
+                enable_audio_route(adev, usecase);
             }
         }
     }
@@ -696,13 +674,13 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
 
     /* Disable current sound devices */
     if (usecase->out_snd_device != SND_DEVICE_NONE) {
-        disable_audio_route(adev, usecase, true);
-        disable_snd_device(adev, usecase->out_snd_device, true);
+        disable_audio_route(adev, usecase);
+        disable_snd_device(adev, usecase->out_snd_device);
     }
 
     if (usecase->in_snd_device != SND_DEVICE_NONE) {
-        disable_audio_route(adev, usecase, true);
-        disable_snd_device(adev, usecase->in_snd_device, true);
+        disable_audio_route(adev, usecase);
+        disable_snd_device(adev, usecase->in_snd_device);
     }
 
 #ifndef PLATFORM_MSM8960
@@ -720,12 +698,12 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
     if (out_snd_device != SND_DEVICE_NONE) {
         if (usecase->devices & AUDIO_DEVICE_OUT_ALL_CODEC_BACKEND)
             check_usecases_codec_backend(adev, usecase, out_snd_device);
-        enable_snd_device(adev, out_snd_device, false);
+        enable_snd_device(adev, out_snd_device);
     }
 
     if (in_snd_device != SND_DEVICE_NONE) {
         check_and_route_capture_usecases(adev, usecase, in_snd_device);
-        enable_snd_device(adev, in_snd_device, false);
+        enable_snd_device(adev, in_snd_device);
     }
 
     if (usecase->type == VOICE_CALL || usecase->type == VOIP_CALL)
@@ -733,12 +711,10 @@ int select_devices(struct audio_device *adev, audio_usecase_t uc_id)
                                                         out_snd_device,
                                                         in_snd_device);
 
-    audio_route_update_mixer(adev->audio_route);
-
     usecase->in_snd_device = in_snd_device;
     usecase->out_snd_device = out_snd_device;
 
-    enable_audio_route(adev, usecase, true);
+    enable_audio_route(adev, usecase);
 
 #ifndef PLATFORM_MSM8960
     /* Applicable only on the targets that has external modem.
@@ -777,10 +753,10 @@ static int stop_input_stream(struct stream_in *in)
 #endif
 
     /* 1. Disable stream specific mixer controls */
-    disable_audio_route(adev, uc_info, true);
+    disable_audio_route(adev, uc_info);
 
     /* 2. Disable the tx device */
-    disable_snd_device(adev, uc_info->in_snd_device, true);
+    disable_snd_device(adev, uc_info->in_snd_device);
 
     list_remove(&uc_info->list);
     free(uc_info);
@@ -1066,7 +1042,7 @@ static int check_and_set_hdmi_channels(struct audio_device *adev,
         usecase = node_to_item(node, struct audio_usecase, list);
         if (usecase->type == PCM_PLAYBACK &&
                 usecase->devices & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
-            disable_audio_route(adev, usecase, true);
+            disable_audio_route(adev, usecase);
         }
     }
 
@@ -1078,7 +1054,7 @@ static int check_and_set_hdmi_channels(struct audio_device *adev,
         usecase = node_to_item(node, struct audio_usecase, list);
         if (usecase->type == PCM_PLAYBACK &&
                 usecase->devices & AUDIO_DEVICE_OUT_AUX_DIGITAL) {
-            enable_audio_route(adev, usecase, true);
+            enable_audio_route(adev, usecase);
         }
     }
 
@@ -1108,10 +1084,10 @@ static int stop_output_stream(struct stream_out *out)
     }
 
     /* 1. Get and set stream specific mixer controls */
-    disable_audio_route(adev, uc_info, true);
+    disable_audio_route(adev, uc_info);
 
     /* 2. Disable the rx device */
-    disable_snd_device(adev, uc_info->out_snd_device, true);
+    disable_snd_device(adev, uc_info->out_snd_device);
 
     list_remove(&uc_info->list);
     free(uc_info);
@@ -2018,7 +1994,7 @@ static ssize_t in_read(struct audio_stream_in *stream, void *buffer,
      * Instead of writing zeroes here, we could trust the hardware
      * to always provide zeroes when muted.
      */
-    if (ret == 0 && voice_get_mic_mute(adev) && !voice_is_in_call(adev))
+    if (ret == 0 && voice_get_mic_mute(adev) && !voice_is_in_call_rec_stream(in))
         memset(buffer, 0, bytes);
 
 exit:
